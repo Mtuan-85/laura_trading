@@ -1,0 +1,7 @@
+PyQt6>=6.7
+patchright>=1.40
+loguru>=0.7
+pydantic>=2.0
+pyyaml>=6.0
+pytest>=8.0
+pytest-asyncio>=0.23

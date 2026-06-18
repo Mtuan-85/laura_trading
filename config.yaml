@@ -1,0 +1,17 @@
+cdp:
+  url: "http://127.0.0.1:9222"
+  profile_marker: "brave-grok-profile"
+  base_url: "https://grok.com/imagine"
+
+ffmpeg:
+  path: "ffmpeg"
+
+defaults:
+  aspect: "9:16"
+  duration: 10
+  retry_count: 2
+  worker_timeout_sec: 600
+
+logging:
+  level: "INFO"
+  file_rotation_mb: 10

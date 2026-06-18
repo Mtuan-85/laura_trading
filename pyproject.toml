@@ -1,0 +1,9 @@
+[project]
+name = "lisa-livetrading"
+version = "0.1.0"
+description = "Chain video generator using Grok CDP"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
