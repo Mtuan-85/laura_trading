@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -22,6 +23,11 @@ from PyQt6.QtWidgets import (
 class MainWindow(QMainWindow):
     start_requested = pyqtSignal(dict)
     stop_requested = pyqtSignal()
+    close_requested = pyqtSignal()
+
+    def closeEvent(self, event) -> None:
+        self.close_requested.emit()
+        event.accept()
 
     def __init__(self) -> None:
         super().__init__()
@@ -34,7 +40,7 @@ class MainWindow(QMainWindow):
         root = QVBoxLayout(central)
 
         ref_row = QHBoxLayout()
-        ref_row.addWidget(QLabel("Ref image:"))
+        ref_row.addWidget(QLabel("File (ảnh/video):"))
         self.ref_edit = QLineEdit()
         ref_row.addWidget(self.ref_edit, 1)
         ref_btn = QPushButton("Browse")
@@ -62,6 +68,12 @@ class MainWindow(QMainWindow):
         self.duration_combo.addItems(["5", "10", "15"])
         self.duration_combo.setCurrentText("10")
         opt_row.addWidget(self.duration_combo)
+        opt_row.addSpacing(20)
+        opt_row.addWidget(QLabel("Số prompt (0 = all):"))
+        self.limit_spin = QSpinBox()
+        self.limit_spin.setRange(0, 9999)
+        self.limit_spin.setValue(0)
+        opt_row.addWidget(self.limit_spin)
         opt_row.addStretch(1)
         root.addLayout(opt_row)
 
@@ -93,7 +105,11 @@ class MainWindow(QMainWindow):
         root.addWidget(self.log, 1)
 
     def _browse_ref(self) -> None:
-        p, _ = QFileDialog.getOpenFileName(self, "Pick reference image", filter="Images (*.png *.jpg *.jpeg)")
+        p, _ = QFileDialog.getOpenFileName(
+            self,
+            "Pick reference image or video",
+            filter="Image or Video (*.png *.jpg *.jpeg *.mp4 *.mov *.webm *.mkv);;All files (*.*)",
+        )
         if p:
             self.ref_edit.setText(p)
 
@@ -108,6 +124,7 @@ class MainWindow(QMainWindow):
             "prompts": self.prompts_edit.text().strip(),
             "aspect": self.aspect_combo.currentText(),
             "duration": int(self.duration_combo.currentText()),
+            "limit": int(self.limit_spin.value()),
         }
         if not payload["ref"] or not payload["prompts"]:
             self.set_status("Pick both ref and prompts before starting.")

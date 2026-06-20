@@ -7,7 +7,10 @@ keeps the browser open and logged in — we never spawn).
 from __future__ import annotations
 
 import asyncio
+import re
 import subprocess
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -20,9 +23,61 @@ from patchright.async_api import (
     async_playwright,
 )
 
+from core.brave_launcher import BraveLauncher
 from core.config import load_config, wait_brave_ready
 
 GROK_HOST = "grok.com"
+
+
+def _port_from_url(cdp_url: str) -> int:
+    m = re.search(r":(\d+)", cdp_url)
+    return int(m.group(1)) if m else 9222
+
+
+def kill_stale_cdp_clients(port: int) -> int:
+    """Kill node.exe processes with ESTABLISHED connection to 127.0.0.1:PORT.
+    Does NOT touch brave.exe. Returns number of killed PIDs."""
+    try:
+        result = subprocess.run(
+            ["netstat", "-ano"], capture_output=True, text=True, timeout=5
+        )
+    except Exception as e:
+        log.warning(f"[cdp] netstat failed, skip stale-kill: {e}")
+        return 0
+    candidate_pids: set[int] = set()
+    for line in result.stdout.splitlines():
+        if f"127.0.0.1:{port}" in line and "ESTABLISHED" in line:
+            m = re.search(r"(\d+)\s*$", line.strip())
+            if m:
+                candidate_pids.add(int(m.group(1)))
+    killed = 0
+    for pid in candidate_pids:
+        try:
+            ps = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV"],
+                capture_output=True, text=True, timeout=5,
+            )
+        except Exception:
+            continue
+        if "node.exe" in ps.stdout.lower():
+            subprocess.run(
+                ["taskkill", "/F", "/PID", str(pid)],
+                check=False, capture_output=True,
+            )
+            killed += 1
+            log.info(f"[cdp] killed stale node.exe pid={pid}")
+    return killed
+
+
+def is_brave_alive(port: int, timeout: float = 2.0) -> bool:
+    """Quick HTTP probe to /json/version. Returns True if CDP responds."""
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/json/version", timeout=timeout
+        ) as r:
+            return r.status == 200
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return False
 
 
 class GrokConnection:
@@ -38,13 +93,14 @@ class GrokConnection:
         await conn.disconnect()
     """
 
-    def __init__(self) -> None:
+    def __init__(self, launcher: BraveLauncher | None = None) -> None:
         self._pw: Playwright | None = None
         self._browser: Browser | None = None
         self._context: BrowserContext | None = None
         self._page: Page | None = None
         self._cdp_url: str | None = None
         self._tab_index: int | None = None
+        self._launcher: BraveLauncher | None = launcher
 
     @property
     def page(self) -> Page | None:
@@ -55,9 +111,31 @@ class GrokConnection:
     async def connect(self, cdp_url: str) -> None:
         if await self.is_connected():
             return
+
+        port = _port_from_url(cdp_url)
+        # Anti-hang: kill stale node.exe drivers holding port from prev runs
+        kill_stale_cdp_clients(port)
+        # Lazy-build a launcher from config if caller didn't inject one
+        if self._launcher is None:
+            cfg = load_config().get("brave", {})
+            # If cfg's debug_port differs from URL's port, URL wins (caller intent).
+            if int(cfg.get("debug_port", port)) != port:
+                cfg = {**cfg, "debug_port": port}
+            self._launcher = BraveLauncher.from_config(cfg)
+        # Auto-launch Brave if not running (only kills what we launched on stop)
+        if not is_brave_alive(port):
+            log.info(f"[cdp] Brave not running on {port}, auto-launching...")
+            await asyncio.to_thread(self._launcher.ensure_running, 30.0)
+        else:
+            # Still call ensure_running so the launcher discovers/adopts PIDs.
+            await asyncio.to_thread(self._launcher.ensure_running, 30.0)
+
         self._pw = await async_playwright().start()
         try:
-            self._browser = await self._pw.chromium.connect_over_cdp(cdp_url)
+            # MUST have timeout — without it, stale drivers hang forever
+            self._browser = await self._pw.chromium.connect_over_cdp(
+                cdp_url, timeout=15_000
+            )
         except Exception as e:
             await self._cleanup()
             raise RuntimeError(f"Không thể kết nối CDP {cdp_url}: {e}") from e
@@ -72,6 +150,9 @@ class GrokConnection:
 
     async def disconnect(self) -> None:
         await self._cleanup()
+        if self._launcher is not None and self._launcher.owned:
+            log.info("Stopping owned Brave instance...")
+            await asyncio.to_thread(self._launcher.stop)
         log.info("Đã ngắt kết nối CDP")
 
     async def is_connected(self) -> bool:
@@ -130,48 +211,39 @@ class GrokConnection:
         await self.select_tab(int(tabs[0]["index"]))
 
     async def kill_and_relaunch_brave(self, project_root: Path | None = None) -> None:
-        """Kill brave.exe + relaunch via launch_brave.bat + wait CDP + reconnect.
+        """Recovery: kill OUR Brave (only what we launched) + relaunch + reconnect.
 
-        Single recovery primitive for any disconnect / fail in workers.
-        `project_root` is accepted for API stability but ignored — config is
-        loaded from APP_ROOT (where launch_brave.bat actually ships).
+        Uses the tracked PIDs from BraveLauncher, never PowerShell guesswork.
+        If we're attached to a Brave we didn't launch (owned=False), we refuse
+        to kill it — just attempt a fresh reconnect.
+
+        `project_root` is accepted for API stability but ignored.
         """
-        from core.config import APP_ROOT
-        cfg = load_config().get("brave", {})
-        process_name = cfg.get("process_name", "brave.exe")
-        debug_port = int(cfg.get("debug_port", 9222))
-        bat_path = Path(cfg.get("launch_bat", "launch_brave.bat"))
-        if not bat_path.is_absolute():
-            bat_path = APP_ROOT / bat_path
-        if not bat_path.exists():
-            raise RuntimeError(f"launch_brave.bat không tồn tại: {bat_path}")
+        if self._launcher is None:
+            # connect() always builds one; this is defensive.
+            raise RuntimeError("kill_and_relaunch_brave: no launcher configured")
 
-        log.warning(f"[BRAVE] Killing {process_name}...")
-        try:
-            subprocess.run(
-                ["taskkill", "/F", "/IM", process_name],
-                capture_output=True, timeout=10,
-            )
-        except Exception as e:
-            log.warning(f"[BRAVE] taskkill ignored: {e}")
-        # Drop the dead Patchright handles before launching the new Brave —
-        # otherwise reconnect_cdp's _cleanup tries to talk to a dead websocket.
+        debug_port = self._launcher.debug_port
+        kill_stale_cdp_clients(debug_port)
+        # Drop dead Patchright handles before we touch the browser.
         try:
             await self._cleanup()
         except Exception:
             pass
-        await asyncio.sleep(2)
 
-        log.info(f"[BRAVE] Running {bat_path}")
-        subprocess.Popen(
-            [str(bat_path)], shell=True,
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+        if not self._launcher.owned:
+            log.warning(
+                "[BRAVE] not owned (user-managed Brave) — reconnecting without kill"
+            )
+            await asyncio.sleep(1)
+            await self.reconnect_cdp()
+            return
+
+        log.warning(
+            f"[BRAVE] surgical kill+relaunch (pids={self._launcher.pids}, "
+            f"profile={self._launcher.user_data_dir})..."
         )
-
-        log.info(f"[BRAVE] Waiting for CDP port {debug_port}...")
-        ready = await wait_brave_ready(port=debug_port, timeout=30)
-        if not ready:
-            raise RuntimeError(f"Brave CDP port {debug_port} not ready after 30s")
+        await asyncio.to_thread(self._launcher.relaunch, 30.0)
 
         log.info("[BRAVE] CDP ready, reconnecting...")
         await self.reconnect_cdp()

@@ -1,6 +1,8 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+.pytest-tmp/
+.claude/
 .venv/
 venv/
 .env
@@ -9,3 +11,5 @@ logs/
 project_*/
 .DS_Store
 *.swp
+assets/
+grok*.json

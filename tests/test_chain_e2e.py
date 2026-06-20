@@ -11,7 +11,7 @@ import pytest
 from core.chain_runner import ChainRunner
 from core.project import ChainProject, ProjectInputs
 from utils.video_concat import probe_duration
-from workers.task_contract import EXIT_SUCCESS, TaskJson
+from workers.task_contract import TaskJson
 
 
 def _ffmpeg() -> str:
@@ -54,27 +54,23 @@ def test_full_chain_with_mocked_worker(tmp_path: Path) -> None:
 
     colors = ["red", "green", "blue"]
 
+    class _W:
+        def send_task(self, task: TaskJson, *, on_marker=lambda m: None, stop_check=lambda: False):
+            out = Path(task.output_path)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            idx = int(task.task_id) - 1
+            _make_clip(out, colors[idx], 2)
+            return {"ok": True, "path": str(out), "attempts": 1}
+
+        def terminate(self):
+            pass
+
     @contextmanager
-    def fake_worker_ctx(task: TaskJson):
-        out = Path(task.output_path)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        idx = int(task.task_id) - 1
-        _make_clip(out, colors[idx], 2)
-
-        class _W:
-            def iter_markers(self):
-                return iter([])
-
-            def wait(self, timeout=None):
-                return EXIT_SUCCESS
-
-            def terminate(self):
-                pass
-
+    def fake_worker_factory():
         yield _W()
 
     runner = ChainRunner(project, config)
-    runner.run(worker_factory=fake_worker_ctx)
+    runner.run(worker_factory=fake_worker_factory)
 
     reloaded = ChainProject.load(folder)
     assert all(c.status == "done" for c in reloaded.clips.values())

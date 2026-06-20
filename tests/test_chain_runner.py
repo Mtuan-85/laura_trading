@@ -6,7 +6,7 @@ from pathlib import Path
 
 from core.chain_runner import ChainRunner
 from core.project import ChainProject, ProjectInputs
-from workers.task_contract import EXIT_FLOW_FAILED, EXIT_SUCCESS, TaskJson
+from workers.task_contract import TaskJson
 
 
 def _prep(tmp_path: Path, prompts: list[str]) -> ChainProject:
@@ -21,27 +21,43 @@ def _prep(tmp_path: Path, prompts: list[str]) -> ChainProject:
     return ChainProject.create(folder, inputs, [f"{i+1:03d}" for i in range(len(prompts))])
 
 
-@contextmanager
-def _fake_worker(exit_code: int, output: Path):
-    class _W:
-        def iter_markers(self):
-            return iter([])
+class _FakeWorker:
+    """Long-lived worker stub: records every send_task call, returns canned outcomes."""
 
-        def wait(self, timeout=None):
-            return exit_code
+    def __init__(
+        self,
+        outcomes: dict[str, dict] | None = None,
+        default_ok: bool = True,
+        on_send: callable | None = None,
+    ) -> None:
+        self.outcomes = outcomes or {}
+        self.default_ok = default_ok
+        self.calls: list[str] = []
+        self._on_send = on_send
 
-        def terminate(self):
-            pass
+    def send_task(self, task: TaskJson, *, on_marker=lambda m: None, stop_check=lambda: False):
+        self.calls.append(task.task_id)
+        if self._on_send is not None:
+            self._on_send(task)
+        outcome = self.outcomes.get(task.task_id)
+        if outcome is None:
+            if self.default_ok:
+                outcome = {"ok": True, "attempts": 1}
+            else:
+                outcome = {"ok": False, "reason": "flow_failed", "attempts": 3}
+        if outcome.get("ok"):
+            Path(task.output_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(task.output_path).write_bytes(b"\x00\x00\x00\x20ftypmp42")
+        return outcome
 
-    if exit_code == EXIT_SUCCESS:
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_bytes(b"\x00\x00\x00\x20ftypmp42")
-    yield _W()
+    def terminate(self) -> None:
+        pass
 
 
-def _factory(exit_code: int):
-    def make(task: TaskJson):
-        return _fake_worker(exit_code, Path(task.output_path))
+def _factory(worker: _FakeWorker):
+    @contextmanager
+    def make():
+        yield worker
     return make
 
 
@@ -49,22 +65,21 @@ def test_run_success_creates_all_clips(tmp_path: Path) -> None:
     project = _prep(tmp_path, ["a", "b", "c"])
 
     extract_calls = []
-
     def fake_extract(video: Path, frame: Path) -> None:
         frame.parent.mkdir(parents=True, exist_ok=True)
         frame.write_bytes(b"FRAMEPNG")
         extract_calls.append((video.name, frame.name))
 
     concat_calls = []
-
     def fake_concat(clips: list[Path], out: Path) -> None:
         out.write_bytes(b"FINAL")
         concat_calls.append([c.name for c in clips])
 
     config = {"ffmpeg": "ffmpeg", "cdp": {"url": "x", "base_url": "y"}, "defaults": {"retry_count": 2, "worker_timeout_sec": 600}}
+    worker = _FakeWorker(default_ok=True)
     runner = ChainRunner(project, config)
     runner.run(
-        worker_factory=_factory(EXIT_SUCCESS),
+        worker_factory=_factory(worker),
         frame_extractor=fake_extract,
         concat=fake_concat,
     )
@@ -75,16 +90,17 @@ def test_run_success_creates_all_clips(tmp_path: Path) -> None:
     assert reloaded.final.path == "final.mp4"
     assert len(extract_calls) == 3
     assert len(concat_calls) == 1
+    assert worker.calls == ["001", "002", "003"]
 
 
 def test_run_retries_then_stops_on_persistent_failure(tmp_path: Path) -> None:
     project = _prep(tmp_path, ["a", "b"])
 
     config = {"ffmpeg": "ffmpeg", "cdp": {"url": "x", "base_url": "y"}, "defaults": {"retry_count": 2, "worker_timeout_sec": 600}}
+    worker = _FakeWorker(default_ok=False)
     runner = ChainRunner(project, config)
-
     runner.run(
-        worker_factory=_factory(EXIT_FLOW_FAILED),
+        worker_factory=_factory(worker),
         frame_extractor=lambda v, f: None,
         concat=lambda cs, o: None,
     )
@@ -94,6 +110,8 @@ def test_run_retries_then_stops_on_persistent_failure(tmp_path: Path) -> None:
     assert reloaded.clips["001"].attempts == 3
     assert reloaded.clips["002"].status == "pending"
     assert reloaded.final.status == "pending"
+    # Worker only invoked once per clip — retries happen inside the worker now.
+    assert worker.calls == ["001"]
 
 
 def test_run_resume_skips_done(tmp_path: Path) -> None:
@@ -105,34 +123,32 @@ def test_run_resume_skips_done(tmp_path: Path) -> None:
     (project.folder / "frames" / "frame_001.png").write_bytes(b"ALREADY")
 
     config = {"ffmpeg": "ffmpeg", "cdp": {"url": "x", "base_url": "y"}, "defaults": {"retry_count": 2, "worker_timeout_sec": 600}}
+    worker = _FakeWorker(default_ok=True)
     runner = ChainRunner(project, config)
-
-    factory_calls = []
-    def tracking_factory(task: TaskJson):
-        factory_calls.append(task.task_id)
-        return _fake_worker(EXIT_SUCCESS, Path(task.output_path))
-
     runner.run(
-        worker_factory=tracking_factory,
+        worker_factory=_factory(worker),
         frame_extractor=lambda v, f: f.write_bytes(b"P"),
         concat=lambda cs, o: o.write_bytes(b"F"),
     )
 
-    assert factory_calls == ["002", "003"]
+    assert worker.calls == ["002", "003"]
 
 
 def test_run_stop_check_interrupts(tmp_path: Path) -> None:
     project = _prep(tmp_path, ["a", "b", "c"])
     config = {"ffmpeg": "ffmpeg", "cdp": {"url": "x", "base_url": "y"}, "defaults": {"retry_count": 2, "worker_timeout_sec": 600}}
+    worker = _FakeWorker(default_ok=True)
     runner = ChainRunner(project, config)
 
+    # Returns True only AFTER the first clip succeeds: clip 001 → done,
+    # clip 002 short-circuits at the outer stop_check before send_task.
     counter = {"n": 0}
     def stopper() -> bool:
         counter["n"] += 1
         return counter["n"] > 1
 
     runner.run(
-        worker_factory=_factory(EXIT_SUCCESS),
+        worker_factory=_factory(worker),
         frame_extractor=lambda v, f: f.write_bytes(b"P"),
         concat=lambda cs, o: o.write_bytes(b"F"),
         stop_check=stopper,

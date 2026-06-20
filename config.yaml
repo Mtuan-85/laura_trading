@@ -3,6 +3,13 @@ cdp:
   profile_marker: "brave-grok-profile"
   base_url: "https://grok.com/imagine"
 
+brave:
+  debug_port: 9222
+  exe: "C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe"
+  user_data_dir: "D:\\CDP_Browser\\brave-grok-profile"
+  start_url: "https://grok.com/imagine"
+  profile_marker: "brave-grok-profile"
+
 ffmpeg:
   path: "ffmpeg"
 

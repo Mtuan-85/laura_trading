@@ -12,8 +12,7 @@ if not exist ".venv\Scripts\activate.bat" (
 call .venv\Scripts\activate.bat
 
 python -m app.main
-if errorlevel 1 (
-    echo.
-    echo [run_gui] App exited with error code %errorlevel%.
-    pause
-)
+set EXITCODE=%errorlevel%
+echo.
+echo [run_gui] App exited with code %EXITCODE%.
+pause
