@@ -32,12 +32,18 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "launch_bat": "launch_brave.bat",
         "process_name": "brave.exe",
     },
-    "ffmpeg": {"path": "ffmpeg"},
+    "ffmpeg": {"path": "ffmpeg", "ffprobe_path": "ffprobe"},
     "defaults": {
         "aspect": "9:16",
         "duration": 10,
         "retry_count": 2,
-        "worker_timeout_sec": 600,
+        "worker_timeout_sec": 900,
+    },
+    "skin_check": {
+        "enabled": True,
+        "threshold": 95,
+        "max_retries": 2,
+        "timeout_s": 120,
     },
     "logging": {"level": "INFO", "file_rotation_mb": 10},
 }

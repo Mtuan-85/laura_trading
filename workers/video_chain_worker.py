@@ -60,7 +60,11 @@ async def _next_command() -> dict | None:
 
 
 async def _process_task(conn, task: TaskJson, max_attempts: int) -> None:
-    print_marker("TASK START", {"task_id": task.task_id, "prompt_chars": len(task.prompt)})
+    print_marker("TASK START", {
+        "task_id": task.task_id,
+        "kind": task.kind,
+        "prompt_chars": len(task.prompt or task.image_edit_prompt or ""),
+    })
 
     ref = Path(task.ref_path)
     if not ref.exists():
@@ -68,20 +72,47 @@ async def _process_task(conn, task: TaskJson, max_attempts: int) -> None:
         return
 
     from engines.grok.engine import GrokVideoEngine
+    from engines.grok.image_ref_engine import GrokImageRefEngine
 
     engine = GrokVideoEngine(conn.page)
+    image_engine = GrokImageRefEngine(conn.page)
 
     def _refresh_page() -> None:
         if conn.page is not None:
             engine.page = conn.page
+            image_engine.page = conn.page
 
-    async def _factory():
-        settings = {
-            "aspect": task.aspect,
-            "duration": f"{task.duration}s",
-            "output_path": task.output_path,
-        }
-        return await engine.gen_video(task.prompt, ref, settings)
+    output_path = Path(task.output_path)
+
+    if task.kind == "image_edit":
+        if not task.image_edit_prompt:
+            print_marker("TASK FAILED", {
+                "reason": "image_edit task missing image_edit_prompt",
+                "attempts": 0,
+            })
+            return
+
+        async def _factory():
+            edit_result = await image_engine.gen_image_with_refs(
+                scene_id=task.task_id,
+                prompt=task.image_edit_prompt or "",
+                ref_paths=[ref],
+                output_path=output_path,
+                aspect=task.aspect,
+            )
+            if not edit_result.get("ok"):
+                raise RuntimeError(
+                    f"image_edit failed: {edit_result.get('reason', 'unknown')}"
+                )
+            return output_path
+    else:  # "video"
+        async def _factory():
+            settings = {
+                "aspect": task.aspect,
+                "duration": f"{task.duration}s",
+                "output_path": str(output_path),
+            }
+            return await engine.gen_video(task.prompt, ref, settings)
 
     def _log(s: str) -> None:
         logger.info(s)
@@ -97,14 +128,21 @@ async def _process_task(conn, task: TaskJson, max_attempts: int) -> None:
     )
 
     if outcome["ok"]:
+        if task.kind == "video":
+            # Surface any warnings (e.g. resolution_downgrade) BEFORE TASK DONE
+            # so the chain runner can act while still tied to this clip.
+            for w in getattr(engine, "last_warnings", None) or []:
+                print_marker("EVENT", w)
         print_marker("TASK DONE", {
             "success": 1,
+            "kind": task.kind,
             "clip": str(outcome["result"]),
             "attempts": outcome["attempts"],
         })
     else:
         print_marker("TASK FAILED", {
             "reason": outcome.get("last_error", "unknown"),
+            "kind": task.kind,
             "attempts": outcome["attempts"],
         })
 

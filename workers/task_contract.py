@@ -20,13 +20,17 @@ _MARKER_RE = re.compile(r"^(?P<kind>TASK START|TASK DONE|TASK FAILED|EVENT)\s+(?
 
 class TaskJson(BaseModel):
     task_id: str
-    prompt: str
+    kind: Literal["image_edit", "video"] = "video"
     ref_path: str
-    aspect: Literal["9:16", "16:9", "1:1"] = "9:16"
-    duration: int = 10
     output_path: str
     cdp_url: str = "http://127.0.0.1:9222"
     cdp_base_url: str = "https://grok.com/imagine"
+    aspect: Literal["9:16", "16:9", "1:1"] = "9:16"
+    # image_edit only
+    image_edit_prompt: str | None = None
+    # video only
+    prompt: str = ""
+    duration: int = 10
 
 
 def print_marker(kind: str, payload: dict) -> None:
