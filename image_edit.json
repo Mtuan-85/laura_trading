@@ -1,5 +1,5 @@
 {
-  "prompt": "improve the image, keep everything in same detail, 4k resolution",
+  "prompt": "Preserve the original image exactly. Do not change, redesign, or restyle the girl and background. Keep the exact same face, expression, proportions, pose, framing, background, objects, all visible details. Only improve 4K/2K resolution, skin tone, luminance and palete, texture fidelity, and lighting",
   "skin_tone_profile": {
     "description": "fair natural Asian skin, soft pink undertone, natural visible skin texture, realistic pores, not plastic, not overly airbrushed",
     "skin_palette": {
