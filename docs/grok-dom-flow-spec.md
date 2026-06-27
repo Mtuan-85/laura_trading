@@ -16,10 +16,10 @@ engines/grok/
 ├── flows.py       ← Khai báo declarative: list các step → action + params.
 ├── runner.py      ← Dispatcher: đọc flow, map action name → hàm trong actions.py,
 │                    quản lý state (counter, current_prompt, vars, errors, downloaded).
-├── engine.py      ← Adapter cấp cao: GrokImageEngine / GrokVideoEngine.
-│                    UI worker chỉ gọi gen_image(prompt, settings, ref) / gen_video(...).
+├── engine.py      ← Adapter cấp cao: GrokVideoEngine.
+│                    UI worker chỉ gọi gen_video(...); image_edit dùng image_ref_engine.py.
+├── image_ref_engine.py ← Direct image-edit flow: upload ref image(s), prompt, wait, download.
 ├── browser.py     ← GrokConnection: CDP attach, list_tabs, select_tab, kill+relaunch.
-└── claude_picker.py ← Vision-based image picker (gọi Claude API). Optional.
 ```
 
 **Quy tắc bất biến (đừng phá):**

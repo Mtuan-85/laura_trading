@@ -1,15 +1,13 @@
 """Skin-similarity check between original ref and Grok-refined image.
 
-Stitches the two images side-by-side with ffmpeg, then asks Claude CLI (via
-subscription, same pattern as engines/grok/claude_picker.py) to compare skin
-tone. Returns a structured verdict so the caller can auto-pass on high
+Stitches the two images side-by-side with ffmpeg, then asks Claude CLI to
+compare skin tone. Returns a structured verdict so the caller can auto-pass on high
 similarity or prompt the user on borderline / low matches.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import re
 import subprocess
 from dataclasses import dataclass
@@ -17,17 +15,10 @@ from pathlib import Path
 
 from loguru import logger as log
 
-CLAUDE_CMD = "claude"
+from core.claude_cli import run_claude
+
 DEFAULT_THRESHOLD = 95
 DEFAULT_TIMEOUT_S = 120
-PROXY_ENV_KEYS = (
-    "HTTP_PROXY",
-    "HTTPS_PROXY",
-    "ALL_PROXY",
-    "http_proxy",
-    "https_proxy",
-    "all_proxy",
-)
 
 
 @dataclass(frozen=True)
@@ -142,22 +133,9 @@ def _clamp_int(v, lo: int, hi: int, *, fallback: int) -> int:
 
 
 def _run_claude_cli_blocking(instruction: str, timeout_s: int) -> tuple[int, str]:
-    env = os.environ.copy()
-    env.pop("ANTHROPIC_API_KEY", None)
-    env.pop("ANTHROPIC_AUTH_TOKEN", None)
-    for key in PROXY_ENV_KEYS:
-        env.pop(key, None)
     try:
-        r = subprocess.run(
-            [CLAUDE_CMD, "--print", "--dangerously-skip-permissions"],
-            input=instruction,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=timeout_s,
-            env=env,
-        )
-        return r.returncode, r.stdout or ""
+        rc, stdout, _stderr = run_claude(instruction, timeout=timeout_s)
+        return rc, stdout
     except FileNotFoundError:
         log.warning("[skin] Claude CLI không tồn tại trong PATH")
         return -1, ""

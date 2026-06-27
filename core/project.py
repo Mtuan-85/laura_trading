@@ -15,6 +15,7 @@ FinalStatus = Literal["pending", "done", "failed"]
 class ProjectInputs(BaseModel):
     ref_image: str
     prompts: str
+    image_edit: str | None = None
     aspect: str = "9:16"
     duration: int = 10
 
@@ -25,6 +26,7 @@ class ClipState(BaseModel):
     ref: str = ""
     clip: str | None = None
     frame: str | None = None
+    refined_ref: str | None = None
     started_at: str | None = None
     finished_at: str | None = None
     attempts: int = 0

@@ -14,7 +14,7 @@ from loguru import logger
 from core.project import ChainProject
 from core.skin_check import SkinResult, check_skin, stitch_side_by_side
 from utils.frame_extractor import extract_last_frame
-from utils.video_concat import concat_with_xfade
+from utils.video_concat import align_and_concat
 from workers.process_launcher import LaunchedWorker
 from workers.task_contract import TaskJson
 
@@ -84,9 +84,11 @@ class ChainRunner:
         frame_extractor = frame_extractor or (
             lambda video, frame: extract_last_frame(video, frame, ffmpeg=ffmpeg_path)
         )
+        ref_image_abs = self.project.folder / self.project.inputs.ref_image
         concat = concat or (
-            lambda clips, output: concat_with_xfade(
-                clips, output, ffmpeg=ffmpeg_path, ffprobe=ffprobe_path
+            lambda clips, output: align_and_concat(
+                clips, ref_image_abs, output,
+                ffmpeg=ffmpeg_path, ffprobe=ffprobe_path,
             )
         )
 
@@ -133,7 +135,8 @@ class ChainRunner:
                 if clip_state.status == "done":
                     continue
 
-                prompt_text = prompts.get(clip_id, "")
+                prompt_input = prompts.get(clip_id, {"prompt": ""})
+                prompt_text = str(prompt_input.get("prompt", ""))
                 ref_rel = "input/ref.png" if idx == 0 else f"frames/frame_{int(clip_ids_in_order[idx-1]):03d}.png"
                 ref_abs = folder / ref_rel
                 clip_abs = folder / f"clips/clip_{int(clip_id):03d}.mp4"
@@ -207,6 +210,8 @@ class ChainRunner:
                     aspect=self.project.inputs.aspect,
                     duration=self.project.inputs.duration,
                     prompt=prompt_text,
+                    prompt_typed_prefix=prompt_input.get("typed_prefix"),
+                    prompt_paste_suffix=prompt_input.get("paste_suffix"),
                 )
 
                 logger.info(f"[runner] sending video clip={clip_id} (timeout={worker_timeout}s)")
@@ -419,10 +424,13 @@ class ChainRunner:
 
         return {"ok": False, "reason": "skin_check_loop_exit", "attempts": attempts_total}
 
-    def _load_prompts(self) -> dict[str, str]:
+    def _load_prompts(self) -> dict[str, dict[str, str | None]]:
         path = self.project.folder / self.project.inputs.prompts
         raw = json.loads(path.read_text(encoding="utf-8"))
-        return {f"{int(item['id']):03d}": _format_prompt(item["prompt"]) for item in raw}
+        return {
+            f"{int(item['id']):03d}": _format_prompt_input(item["prompt"])
+            for item in raw
+        }
 
     def _load_image_edit_prompt(self) -> str | None:
         rel = self.project.inputs.image_edit
@@ -430,10 +438,62 @@ class ChainRunner:
             return None
         path = self.project.folder / rel
         raw = json.loads(path.read_text(encoding="utf-8"))
-        prompt = raw.get("prompt") if isinstance(raw, dict) else None
-        if not isinstance(prompt, str) or not prompt.strip():
-            raise ValueError(f"{path} must contain a non-empty 'prompt'")
-        return prompt.strip()
+        try:
+            return _compose_image_edit_prompt(raw)
+        except ValueError as e:
+            raise ValueError(f"{path}: {e}") from None
+
+
+def _compose_image_edit_prompt(raw: object) -> str:
+    """Combine `prompt` with optional `skin_tone_profile` flattened into prose.
+
+    The bare prompt comes first; if `skin_tone_profile` is a dict, a
+    natural-language English block describing the profile is appended so the
+    full instruction reaches Grok's image-edit textbox.
+    """
+    if not isinstance(raw, dict):
+        raise ValueError("image_edit JSON must be an object")
+    prompt = raw.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ValueError("must contain a non-empty 'prompt'")
+    parts = [prompt.strip()]
+    profile = raw.get("skin_tone_profile")
+    if isinstance(profile, dict):
+        flattened = _flatten_skin_tone_profile(profile)
+        if flattened:
+            parts.append(flattened)
+    return "\n\n".join(parts)
+
+
+def _flatten_skin_tone_profile(profile: dict) -> str:
+    lines: list[str] = []
+    description = profile.get("description")
+    if isinstance(description, str) and description.strip():
+        lines.append(f"Skin tone reference: {description.strip()}.")
+
+    palette = profile.get("skin_palette")
+    if isinstance(palette, dict) and palette:
+        entries = ", ".join(
+            f"{key.replace('_', ' ')} {value}" for key, value in palette.items()
+        )
+        lines.append(f"Skin palette (hex) — {entries}.")
+
+    luminance = profile.get("skin_luminance_rgb_scale")
+    if isinstance(luminance, dict) and luminance:
+        entries = ", ".join(
+            f"{key.removesuffix('_Y').replace('_', ' ')} {value}"
+            for key, value in luminance.items()
+        )
+        lines.append(f"Skin luminance (Y on 0-255 scale) — {entries}.")
+
+    lighting = profile.get("lighting")
+    if isinstance(lighting, dict) and lighting:
+        for key, value in lighting.items():
+            if isinstance(value, str) and value.strip():
+                label = key.replace("_", " ")
+                lines.append(f"Lighting ({label}): {value.strip()}.")
+
+    return "\n".join(lines)
 
 
 def _send_task_with_optional_timeout(
@@ -473,14 +533,32 @@ def _emit_marker(on_event, clip_id: str, item: tuple[str, dict] | str) -> None:
 
 
 def _format_prompt(p: Any) -> str:
+    return _format_prompt_input(p)["prompt"] or ""
+
+
+def _format_prompt_input(p: Any) -> dict[str, str | None]:
     if isinstance(p, str):
-        return p
-    parts = [
-        p.get("character", ""),
-        f"Action: {p.get('action', '')}",
-        f"Emotion: {p.get('emotion', '')}",
-        f"Camera: {p.get('camera', '')}",
-        f"Sound: {p.get('sound', '')}",
-        f"Negative: {p.get('negative_prompt', '')}",
+        return {"prompt": p, "typed_prefix": None, "paste_suffix": None}
+
+    def labelled(label: str, key: str) -> str | None:
+        value = p.get(key, "")
+        if not isinstance(value, str) or not value.strip():
+            return None
+        return f"{label}: {value.strip()}"
+
+    character = p.get("character", "")
+    typed_prefix = character.strip() if isinstance(character, str) and character.strip() else None
+    rest = [
+        labelled("Action", "action"),
+        labelled("Emotion", "emotion"),
+        labelled("Camera", "camera"),
+        labelled("Sound", "sound"),
+        labelled("Negative", "negative_prompt"),
     ]
-    return "\n\n".join(s for s in parts if s.strip().rstrip(":"))
+    paste_parts = [part for part in rest if part]
+    cleaned = ([typed_prefix] if typed_prefix else []) + paste_parts
+    return {
+        "prompt": "\n\n".join(cleaned),
+        "typed_prefix": typed_prefix,
+        "paste_suffix": "\n\n".join(paste_parts) if paste_parts else None,
+    }

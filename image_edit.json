@@ -1,0 +1,21 @@
+{
+  "prompt": "improve the image, keep everything in same detail, 4k resolution",
+  "skin_tone_profile": {
+    "description": "fair natural Asian skin, soft pink undertone, natural visible skin texture, realistic pores, not plastic, not overly airbrushed",
+    "skin_palette": {
+      "soft_shadow": "#C98776",
+      "base": "#E0A092",
+      "highlight": "#F3C1B5",
+      "bright_highlight": "#FFD4C8"
+    },
+    "skin_luminance_rgb_scale": {
+      "soft_shadow_Y": 150,
+      "base_Y": 180,
+      "highlight_Y": 205,
+      "bright_highlight_Y": 222
+    },
+    "lighting": {
+      "fill_light": "soft frontal fill light at low intensity to lift the face, while keeping shadows natural and the skin bright, clean, and readable"
+    }
+  }
+}

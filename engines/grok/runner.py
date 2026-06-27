@@ -28,10 +28,7 @@ class FlowRunner:
         typing_speed                            — fast | human | slow
         output_path                             — where download_to writes
         debug_dir                               — candidates logging root (Path | None)
-        pick_mode                               — auto | claude
-        pick_fn                                 — async callable for claude pick
-                                                  (signature: (candidate_paths, prompt, topic, style) -> int)
-        topic, style                            — passed to pick_fn
+        image candidate flows always pick the first completed candidate.
     """
 
     def __init__(
@@ -51,6 +48,7 @@ class FlowRunner:
             "vars": {},
             "errors": [],
             "downloaded": [],
+            "warnings": [],
         }
         self._stop = asyncio.Event()
 
@@ -115,6 +113,19 @@ class FlowRunner:
         if action == "set_video_resolution":
             return await actions.set_video_resolution(page, self._resolved_value(step))
 
+        if action == "verify_video_resolution":
+            expected = self._resolved_value(step) or self.config.get("resolution", "720p")
+            res = await actions.verify_video_resolution(page, expected)
+            if res.get("ok") and res.get("downgrade"):
+                self.state["warnings"].append(
+                    {
+                        "type": "resolution_downgrade",
+                        "actual_p": res["actual_p"],
+                        "expected_p": res["expected_p"],
+                    }
+                )
+            return res
+
         if action == "set_video_duration":
             return await actions.set_video_duration(page, self._resolved_value(step))
 
@@ -128,6 +139,8 @@ class FlowRunner:
             return await actions.fill_prompt(
                 page, self._resolved_value(step),
                 speed=speed, fast_mode=fast_mode, stop_event=stop_event,
+                typed_prefix=self.config.get("prompt_typed_prefix"),
+                paste_suffix=self.config.get("prompt_paste_suffix"),
             )
 
         if action == "click_submit":
@@ -168,7 +181,6 @@ class FlowRunner:
                 prompt_text=cp.get("text", ""),
                 masonry_index=int(masonry_index),
                 target_count=target_count,
-                pick_mode=self.config.get("pick_mode", "auto"),
             )
             self.state["vars"]["candidate_paths"] = res.get("paths") or []
             return res
@@ -224,39 +236,8 @@ class FlowRunner:
     async def _pick_image(self) -> int:
         debug_dir = self.config.get("debug_dir")
         counter = self.state["counter"]
-        mode = (self.config.get("pick_mode") or "auto").lower()
-        candidate_paths = self.state["vars"].get("candidate_paths") or []
-        cp = self.state.get("current_prompt") or {}
-
-        if mode == "auto":
-            choice = 0
-            pick_data = {"choice": 0, "mode": "auto", "reason": "First image (auto)"}
-        elif mode == "claude":
-            pick_fn = self.config.get("pick_fn")
-            if not pick_fn or not candidate_paths:
-                log.warning("Claude pick fn missing or no candidates — fallback 0")
-                choice = 0
-                pick_data = {
-                    "choice": 0,
-                    "mode": "claude_fallback",
-                    "reason": "missing pick_fn or candidate_paths",
-                }
-            else:
-                try:
-                    choice = await pick_fn(
-                        candidate_paths,
-                        cp.get("text", ""),
-                        self.config.get("topic", ""),
-                        self.config.get("style", ""),
-                    )
-                    pick_data = {"choice": choice, "mode": "claude", "reason": "vision pick"}
-                except Exception as e:
-                    log.warning(f"Claude pick raised: {e}")
-                    choice = 0
-                    pick_data = {"choice": 0, "mode": "claude_fallback", "reason": str(e)}
-        else:
-            choice = 0
-            pick_data = {"choice": 0, "mode": "unknown", "reason": f"unknown mode: {mode}"}
+        choice = 0
+        pick_data = {"choice": choice, "mode": "auto", "reason": "First image (auto)"}
 
         if debug_dir:
             await actions.write_pick_log(Path(debug_dir), counter, pick_data)

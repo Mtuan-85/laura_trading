@@ -37,10 +37,14 @@ def test_full_chain_with_mocked_worker(tmp_path: Path) -> None:
     folder.mkdir()
     (folder / "input").mkdir()
     ref = folder / "input" / "ref.png"
-    ref.write_bytes(bytes.fromhex(
-        "89504E470D0A1A0A0000000D49484452000000010000000108060000001F15C4890000"
-        "000A49444154789C6300010000000500010D0A2DB40000000049454E44AE426082"
-    ))
+    subprocess.run(
+        [
+            _ffmpeg(), "-y", "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i", "color=c=0xA87C6D:s=128x128:d=1",
+            "-frames:v", "1", str(ref),
+        ],
+        check=True,
+    )
     prompts = [{"id": i + 1, "prompt": f"clip {i+1}"} for i in range(3)]
     (folder / "input" / "prompts.json").write_text(json.dumps(prompts), encoding="utf-8")
 

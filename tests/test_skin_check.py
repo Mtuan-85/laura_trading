@@ -114,16 +114,22 @@ def test_check_skin_clears_anthropic_env(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:8080")
     captured: dict = {}
 
-    def fake_run(args, *, input=None, capture_output=False, text=False,
-                 encoding=None, timeout=None, env=None):
-        captured["env"] = env
-        return subprocess.CompletedProcess(
-            args=args, returncode=0,
-            stdout='{"skin_similarity": 99, "lighting_similarity": 90, "verdict": "pass", "rationale": "ok"}',
-            stderr="",
-        )
+    from core import claude_cli
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    class FakeProc:
+        returncode = 0
+        def communicate(self, input: str, timeout: int) -> tuple[str, str]:
+            return (
+                '{"skin_similarity": 99, "lighting_similarity": 90, "verdict": "pass", "rationale": "ok"}',
+                "",
+            )
+
+    def fake_popen(cmd, **kwargs):
+        captured["env"] = kwargs.get("env")
+        return FakeProc()
+
+    monkeypatch.setattr(claude_cli, "find_claude_exe", lambda: r"C:\fake\claude.cmd")
+    monkeypatch.setattr(claude_cli.subprocess, "Popen", fake_popen)
     r = check_skin(img)
     assert r.verdict == "pass"
     assert "ANTHROPIC_API_KEY" not in captured["env"]

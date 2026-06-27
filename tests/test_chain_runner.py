@@ -4,7 +4,7 @@ import json
 from contextlib import contextmanager
 from pathlib import Path
 
-from core.chain_runner import ChainRunner
+from core.chain_runner import ChainRunner, _compose_image_edit_prompt, _format_prompt_input
 from core.project import ChainProject, ProjectInputs
 from core.skin_check import SkinResult
 from workers.task_contract import TaskJson
@@ -308,12 +308,13 @@ def test_default_media_tools_use_configured_paths(tmp_path: Path, monkeypatch) -
         calls["extract"] = ffmpeg
         frame.write_bytes(b"P")
 
-    def fake_concat(clips, output, *, ffmpeg, ffprobe):
+    def fake_concat(clips, ref, output, *, ffmpeg, ffprobe):
         calls["concat"] = (ffmpeg, ffprobe)
+        calls["concat_ref"] = ref
         output.write_bytes(b"F")
 
     monkeypatch.setattr("core.chain_runner.extract_last_frame", fake_extract)
-    monkeypatch.setattr("core.chain_runner.concat_with_xfade", fake_concat)
+    monkeypatch.setattr("core.chain_runner.align_and_concat", fake_concat)
 
     ChainRunner(project, config).run(
         worker_factory=_factory(worker),
@@ -321,10 +322,9 @@ def test_default_media_tools_use_configured_paths(tmp_path: Path, monkeypatch) -
         skin_stitcher=_noop_stitch,
     )
 
-    assert calls == {
-        "extract": "custom-ffmpeg",
-        "concat": ("custom-ffmpeg", "custom-ffprobe"),
-    }
+    assert calls["extract"] == "custom-ffmpeg"
+    assert calls["concat"] == ("custom-ffmpeg", "custom-ffprobe")
+    assert Path(calls["concat_ref"]) == project.folder / "input" / "ref.png"
 
 
 def test_second_clip_runs_image_edit_then_video(tmp_path: Path) -> None:
@@ -354,6 +354,69 @@ def test_second_clip_runs_image_edit_then_video(tmp_path: Path) -> None:
     assert video.ref_path.endswith("refined_001.jpg")
     reloaded = ChainProject.load(project.folder)
     assert reloaded.clips["002"].refined_ref == "refined/refined_001.jpg"
+
+
+def test_dict_prompt_is_split_for_hybrid_input() -> None:
+    prompt = {
+        "character": "Lisa, Vietnamese livestream trader",
+        "action": "points at a candlestick chart",
+        "emotion": "focused",
+        "camera": "medium close-up",
+        "sound": "soft room tone",
+        "negative_prompt": "extra fingers",
+    }
+
+    payload = _format_prompt_input(prompt)
+
+    assert payload["prompt"].startswith("Lisa, Vietnamese livestream trader")
+    assert payload["typed_prefix"] == "Lisa, Vietnamese livestream trader"
+    assert payload["paste_suffix"] == (
+        "Action: points at a candlestick chart\n\n"
+        "Emotion: focused\n\n"
+        "Camera: medium close-up\n\n"
+        "Sound: soft room tone\n\n"
+        "Negative: extra fingers"
+    )
+
+
+def test_chain_runner_sends_hybrid_prompt_fields_for_dict_prompt(tmp_path: Path) -> None:
+    folder = tmp_path / "project"
+    folder.mkdir()
+    (folder / "input").mkdir()
+    (folder / "input" / "ref.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (folder / "input" / "prompts.json").write_text(
+        json.dumps([
+            {
+                "id": 1,
+                "prompt": {
+                    "character": "Lisa, Vietnamese livestream trader",
+                    "action": "points at a candlestick chart",
+                },
+            }
+        ]),
+        encoding="utf-8",
+    )
+    project = ChainProject.create(
+        folder,
+        ProjectInputs(ref_image="input/ref.png", prompts="input/prompts.json", aspect="9:16", duration=10),
+        ["001"],
+    )
+    worker = _FakeWorker()
+
+    ChainRunner(
+        project,
+        {"cdp": {"url": "x"}, "defaults": {"retry_count": 0, "worker_timeout_sec": 600}},
+    ).run(
+        worker_factory=_factory(worker),
+        frame_extractor=lambda _v, f: f.write_bytes(b"P"),
+        concat=lambda _cs, o: o.write_bytes(b"F"),
+        skin_checker=_ok_skin,
+        skin_stitcher=_noop_stitch,
+    )
+
+    task = worker.tasks[0]
+    assert task.prompt_typed_prefix == "Lisa, Vietnamese livestream trader"
+    assert task.prompt_paste_suffix == "Action: points at a candlestick chart"
 
 
 def test_resume_reuses_existing_refined_frame(tmp_path: Path) -> None:
@@ -547,3 +610,59 @@ def test_skin_check_disabled_skips_check(tmp_path: Path) -> None:
     assert skin_called["n"] == 0
     reloaded = ChainProject.load(project.folder)
     assert reloaded.clips["002"].status == "done"
+
+
+# -- _compose_image_edit_prompt -----------------------------------------
+
+
+def test_compose_image_edit_prompt_returns_bare_prompt_when_no_profile() -> None:
+    composed = _compose_image_edit_prompt({"prompt": "improve the image, 4k"})
+    assert composed == "improve the image, 4k"
+
+
+def test_compose_image_edit_prompt_appends_flattened_skin_profile() -> None:
+    composed = _compose_image_edit_prompt(
+        {
+            "prompt": "improve the image, keep everything in same detail, 4k resolution",
+            "skin_tone_profile": {
+                "description": "fair natural Asian skin, soft pink undertone",
+                "skin_palette": {
+                    "soft_shadow": "#C98776",
+                    "base": "#E0A092",
+                    "highlight": "#F3C1B5",
+                    "bright_highlight": "#FFD4C8",
+                },
+                "skin_luminance_rgb_scale": {
+                    "soft_shadow_Y": 150,
+                    "base_Y": 180,
+                    "highlight_Y": 205,
+                    "bright_highlight_Y": 222,
+                },
+                "lighting": {
+                    "fill_light": "soft frontal fill light at low intensity",
+                },
+            },
+        }
+    )
+    assert composed.startswith(
+        "improve the image, keep everything in same detail, 4k resolution"
+    )
+    assert "fair natural Asian skin, soft pink undertone" in composed
+    for hex_color in ("#C98776", "#E0A092", "#F3C1B5", "#FFD4C8"):
+        assert hex_color in composed
+    for y in ("150", "180", "205", "222"):
+        assert y in composed
+    assert "soft frontal fill light at low intensity" in composed
+
+
+def test_compose_image_edit_prompt_rejects_empty_prompt() -> None:
+    import pytest
+    with pytest.raises(ValueError, match="non-empty 'prompt'"):
+        _compose_image_edit_prompt({"prompt": "   "})
+
+
+def test_compose_image_edit_prompt_ignores_non_dict_profile() -> None:
+    composed = _compose_image_edit_prompt(
+        {"prompt": "bare", "skin_tone_profile": "not a dict"}
+    )
+    assert composed == "bare"

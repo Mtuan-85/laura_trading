@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import faulthandler
 import json
+import os
 import shutil
 import sys
 import threading
 import traceback
+import webbrowser
 from datetime import datetime
 from pathlib import Path
 
@@ -105,6 +107,66 @@ class _RunnerThread(QThread):
             self.finished_clean.emit()
 
 
+def _open_in_explorer(path: Path) -> None:
+    if not path.exists():
+        return
+    if os.name == "nt":
+        os.startfile(str(path))
+    else:
+        webbrowser.open(path.as_uri())
+
+
+def _notify_chain_done(parent, folder: Path, final_rel: str) -> None:
+    final_abs = folder / final_rel
+    box = QMessageBox(parent)
+    box.setIcon(QMessageBox.Icon.Information)
+    box.setWindowTitle("Chain hoàn tất")
+    box.setText("Đã sinh xong tất cả clip và ghép final video.")
+    box.setInformativeText(f"Final: {final_abs}")
+    open_video = box.addButton("Mở video", QMessageBox.ButtonRole.AcceptRole)
+    open_folder = box.addButton("Mở thư mục", QMessageBox.ButtonRole.ActionRole)
+    box.addButton("Đóng", QMessageBox.ButtonRole.RejectRole)
+    box.setDefaultButton(open_video)
+    box.exec()
+    clicked = box.clickedButton()
+    if clicked is open_video:
+        _open_in_explorer(final_abs)
+    elif clicked is open_folder:
+        _open_in_explorer(folder)
+
+
+def _notify_chain_failed(
+    parent,
+    folder: Path,
+    clip_id: str | None,
+    payload: dict,
+    *,
+    concat: bool = False,
+) -> None:
+    box = QMessageBox(parent)
+    box.setIcon(QMessageBox.Icon.Warning)
+    if concat:
+        title = "Ghép final thất bại"
+        text = "Concat (final.mp4) thất bại — các clip đã sinh vẫn còn trong thư mục."
+    elif clip_id is not None:
+        title = f"Clip {clip_id} thất bại"
+        text = f"Chain đã dừng tại clip {clip_id}."
+    else:
+        title = "Chain dừng"
+        text = "Chain đã dừng do lỗi."
+    reason = payload.get("reason") if isinstance(payload, dict) else None
+    box.setWindowTitle(title)
+    box.setText(text)
+    if reason:
+        box.setInformativeText(f"Lý do: {reason}")
+    open_folder = box.addButton("Mở thư mục", QMessageBox.ButtonRole.ActionRole)
+    box.addButton("Đóng", QMessageBox.ButtonRole.RejectRole)
+    box.setDefaultButton(open_folder)
+    box.exec()
+    if box.clickedButton() is open_folder:
+        _open_in_explorer(folder)
+
+
 def _keep_worker_line(line: str) -> bool:
     s = line.strip()
     if not s:
@@ -157,6 +219,43 @@ def _validate_prompts(raw: object) -> tuple[list[dict], list[str]]:
     return prompts, clip_ids
 
 
+def _prompt_range(payload: dict) -> tuple[int, int]:
+    start = int(payload.get("prompt_start") or 1)
+    if start < 1:
+        raise ValueError("prompt_start must be >= 1")
+    if "prompt_count" in payload:
+        count = int(payload.get("prompt_count") or 0)
+    else:
+        count = int(payload.get("limit") or 0)
+    if count < 0:
+        raise ValueError("prompt_count must be >= 0")
+    return start, count
+
+
+def _slice_prompts(prompts: list[dict], payload: dict) -> list[dict]:
+    start, count = _prompt_range(payload)
+    start_index = start - 1
+    if start_index >= len(prompts):
+        raise ValueError(
+            f"prompt_start {start} is beyond prompts length {len(prompts)}"
+        )
+    if count > 0:
+        return prompts[start_index:start_index + count]
+    return prompts[start_index:]
+
+
+def _project_cache_key(payload: dict) -> tuple[str, str, str, int, int, int]:
+    start, count = _prompt_range(payload)
+    return (
+        str(Path(payload.get("prompts", "")).resolve()),
+        str(Path(payload.get("ref", "")).resolve()) if payload.get("ref") else "",
+        str(payload.get("aspect", "")),
+        int(payload.get("duration") or 0),
+        start,
+        count,
+    )
+
+
 def _ffmpeg_path(config: dict) -> str:
     value = config.get("ffmpeg", {})
     if isinstance(value, dict):
@@ -206,9 +305,8 @@ def _setup_project(payload: dict, config: dict | None = None) -> ChainProject:
 
     raw_prompts = json.loads(prompts_path.read_text(encoding="utf-8"))
     prompts, _ = _validate_prompts(raw_prompts)
-    limit = int(payload.get("limit") or 0)
-    if limit > 0:
-        prompts = prompts[:limit]
+    prompt_start, prompt_count = _prompt_range(payload)
+    prompts = _slice_prompts(prompts, payload)
     prompts, clip_ids = _validate_prompts(prompts)
 
     folder = next_project_folder(ref.parent, datetime.now().astimezone())
@@ -233,8 +331,10 @@ def _setup_project(payload: dict, config: dict | None = None) -> ChainProject:
 
     logger.info(f"[setup] parsed prompts: {len(prompts)} items")
 
-    if limit > 0:
-        logger.info(f"[setup] sliced to first {limit} prompts")
+    logger.info(
+        f"[setup] sliced prompts: start={prompt_start} "
+        f"count={prompt_count or 'all'} selected={len(prompts)}"
+    )
 
     logger.info(f"[setup] clip_ids={clip_ids}")
 
@@ -263,17 +363,17 @@ def main() -> int:
     win = MainWindow()
     state: dict[str, object | None] = {
         "thread": None,
-        "prompt_selection": None,
+        "project_cache_key": None,
         "project_folder": None,
     }
 
     def handle_start(payload: dict) -> None:
         logger.info("[gui] Start clicked")
         try:
-            prompt_selection = str(Path(payload["prompts"]).resolve())
+            cache_key = _project_cache_key(payload)
             cached_folder = state.get("project_folder")
             if (
-                state.get("prompt_selection") == prompt_selection
+                state.get("project_cache_key") == cache_key
                 and isinstance(cached_folder, Path)
                 and (cached_folder / "state.json").exists()
             ):
@@ -281,7 +381,7 @@ def main() -> int:
                 logger.info(f"[gui] resuming cached project={cached_folder}")
             else:
                 project = _setup_project(payload, config)
-                state["prompt_selection"] = prompt_selection
+                state["project_cache_key"] = cache_key
                 state["project_folder"] = project.folder
         except Exception as e:
             logger.exception("[gui] _setup_project failed")
@@ -314,11 +414,15 @@ def main() -> int:
             elif ev.kind == "clip_failed":
                 win.append_log(f"Clip {ev.clip_id} FAILED: {ev.payload}")
                 win.set_status(f"Clip {ev.clip_id} failed - chain stopped")
+                _notify_chain_failed(win, project.folder, ev.clip_id, ev.payload)
             elif ev.kind == "final_done":
-                win.append_log(f"Final video ready: {ev.payload.get('path')}")
+                final_path = ev.payload.get("path", "final.mp4")
+                win.append_log(f"Final video ready: {final_path}")
                 win.set_status("Done.")
+                _notify_chain_done(win, project.folder, final_path)
             elif ev.kind == "final_failed":
                 win.append_log(f"Concat failed: {ev.payload}")
+                _notify_chain_failed(win, project.folder, None, ev.payload, concat=True)
             elif ev.kind == "skin_check":
                 p = ev.payload
                 win.append_log(

@@ -30,6 +30,8 @@ class TaskJson(BaseModel):
     image_edit_prompt: str | None = None
     # video only
     prompt: str = ""
+    prompt_typed_prefix: str | None = None
+    prompt_paste_suffix: str | None = None
     duration: int = 10
 
 

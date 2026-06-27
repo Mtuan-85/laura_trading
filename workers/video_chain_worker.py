@@ -111,6 +111,8 @@ async def _process_task(conn, task: TaskJson, max_attempts: int) -> None:
                 "aspect": task.aspect,
                 "duration": f"{task.duration}s",
                 "output_path": str(output_path),
+                "prompt_typed_prefix": task.prompt_typed_prefix,
+                "prompt_paste_suffix": task.prompt_paste_suffix,
             }
             return await engine.gen_video(task.prompt, ref, settings)
 

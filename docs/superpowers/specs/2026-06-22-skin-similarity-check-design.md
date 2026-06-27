@@ -104,8 +104,8 @@ def check_skin(stitched: Path, *, threshold: int = 95, timeout_s: int = 120) -> 
 - `stitch_side_by_side` runs `ffmpeg -y -i ref -i refined -filter_complex
   "[0:v]scale=-1:768[a];[1:v]scale=-1:768[b];[a][b]hstack=inputs=2" -q:v 3 out`.
 - `check_skin` calls `claude --print --dangerously-skip-permissions` with
-  stdin instruction (Vietnamese prompt, JSON-only output). Pops
-  `ANTHROPIC_API_KEY` and proxy env vars (same as `claude_picker.py`).
+  stdin instruction (Vietnamese prompt, JSON-only output). It uses the shared
+  `core.claude_cli` helper, which clears `ANTHROPIC_API_KEY` and proxy env vars.
 - Parsing failures → `SkinResult(skin=0, lighting=0, verdict="ask",
   rationale="<error>")` so the caller always gets a valid object.
 

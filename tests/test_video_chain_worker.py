@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import engines.grok.engine as grok_engine
+import engines.grok.image_ref_engine as grok_image_ref_engine
 from workers.task_contract import EXIT_PARSE_FAILED, EXIT_PREREQ_MISSING
 from workers.task_contract import TaskJson
 from workers import video_chain_worker
@@ -101,8 +103,8 @@ def test_worker_image_edit_task_calls_image_engine_only(tmp_path: Path, monkeypa
         result = await kwargs["gen_factory"]()
         return {"ok": True, "result": result, "attempts": 1}
 
-    monkeypatch.setattr("engines.grok.image_ref_engine.GrokImageRefEngine", FakeImageEngine)
-    monkeypatch.setattr("engines.grok.engine.GrokVideoEngine", FakeVideoEngine)
+    monkeypatch.setattr(grok_image_ref_engine, "GrokImageRefEngine", FakeImageEngine)
+    monkeypatch.setattr(grok_engine, "GrokVideoEngine", FakeVideoEngine)
     monkeypatch.setattr(video_chain_worker, "run_with_retry", fake_retry)
     monkeypatch.setattr(video_chain_worker, "print_marker", lambda k, p: markers.append((k, p)))
 
@@ -151,8 +153,8 @@ def test_worker_video_task_calls_video_engine_only(tmp_path: Path, monkeypatch) 
         result = await kwargs["gen_factory"]()
         return {"ok": True, "result": result, "attempts": 1}
 
-    monkeypatch.setattr("engines.grok.image_ref_engine.GrokImageRefEngine", FakeImageEngine)
-    monkeypatch.setattr("engines.grok.engine.GrokVideoEngine", FakeVideoEngine)
+    monkeypatch.setattr(grok_image_ref_engine, "GrokImageRefEngine", FakeImageEngine)
+    monkeypatch.setattr(grok_engine, "GrokVideoEngine", FakeVideoEngine)
     monkeypatch.setattr(video_chain_worker, "run_with_retry", fake_retry)
     monkeypatch.setattr(video_chain_worker, "print_marker", lambda k, p: markers.append((k, p)))
 

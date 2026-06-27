@@ -11,6 +11,7 @@ def _inputs() -> ProjectInputs:
     return ProjectInputs(
         ref_image="input/ref.png",
         prompts="input/prompts.json",
+        image_edit="input/image_edit.json",
         aspect="9:16",
         duration=10,
     )
@@ -37,6 +38,12 @@ def test_update_clip_persists(tmp_path: Path) -> None:
     assert reloaded.clips["001"].status == "done"
     assert reloaded.clips["001"].attempts == 1
     assert reloaded.clips["001"].clip == "clips/clip_001.mp4"
+
+
+def test_refined_reference_persists(tmp_path: Path) -> None:
+    p = ChainProject.create(tmp_path, _inputs(), ["001"])
+    p.update_clip("001", refined_ref="refined/refined_000.jpg")
+    assert ChainProject.load(tmp_path).clips["001"].refined_ref == "refined/refined_000.jpg"
 
 
 def test_pending_clip_ids_skips_done(tmp_path: Path) -> None:

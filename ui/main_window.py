@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import webbrowser
 from pathlib import Path
 
@@ -65,15 +66,21 @@ class MainWindow(QMainWindow):
         opt_row.addSpacing(20)
         opt_row.addWidget(QLabel("Duration:"))
         self.duration_combo = QComboBox()
-        self.duration_combo.addItems(["5", "10", "15"])
+        self.duration_combo.addItems(["6", "10"])
         self.duration_combo.setCurrentText("10")
         opt_row.addWidget(self.duration_combo)
         opt_row.addSpacing(20)
-        opt_row.addWidget(QLabel("Số prompt (0 = all):"))
-        self.limit_spin = QSpinBox()
-        self.limit_spin.setRange(0, 9999)
-        self.limit_spin.setValue(0)
-        opt_row.addWidget(self.limit_spin)
+        opt_row.addWidget(QLabel("Start:"))
+        self.prompt_start_spin = QSpinBox()
+        self.prompt_start_spin.setRange(1, 9999)
+        self.prompt_start_spin.setValue(1)
+        opt_row.addWidget(self.prompt_start_spin)
+        opt_row.addSpacing(12)
+        opt_row.addWidget(QLabel("Count (0 = all):"))
+        self.prompt_count_spin = QSpinBox()
+        self.prompt_count_spin.setRange(0, 9999)
+        self.prompt_count_spin.setValue(0)
+        opt_row.addWidget(self.prompt_count_spin)
         opt_row.addStretch(1)
         root.addLayout(opt_row)
 
@@ -114,7 +121,11 @@ class MainWindow(QMainWindow):
             self.ref_edit.setText(p)
 
     def _browse_prompts(self) -> None:
-        p, _ = QFileDialog.getOpenFileName(self, "Pick prompts.json", filter="JSON (*.json)")
+        p, _ = QFileDialog.getOpenFileName(
+            self,
+            "Pick prompts.json or state.json",
+            filter="Project state or prompts (*.json)",
+        )
         if p:
             self.prompts_edit.setText(p)
 
@@ -124,10 +135,11 @@ class MainWindow(QMainWindow):
             "prompts": self.prompts_edit.text().strip(),
             "aspect": self.aspect_combo.currentText(),
             "duration": int(self.duration_combo.currentText()),
-            "limit": int(self.limit_spin.value()),
+            "prompt_start": int(self.prompt_start_spin.value()),
+            "prompt_count": int(self.prompt_count_spin.value()),
         }
-        if not payload["ref"] or not payload["prompts"]:
-            self.set_status("Pick both ref and prompts before starting.")
+        if not payload["prompts"]:
+            self.set_status("Pick prompts.json or state.json before starting.")
             return
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
@@ -135,7 +147,10 @@ class MainWindow(QMainWindow):
 
     def _open_folder_clicked(self) -> None:
         if self._last_output_folder and self._last_output_folder.exists():
-            webbrowser.open(self._last_output_folder.as_uri())
+            if os.name == "nt":
+                os.startfile(str(self._last_output_folder))
+            else:
+                webbrowser.open(self._last_output_folder.as_uri())
 
     def set_status(self, text: str) -> None:
         self.status_label.setText(text)

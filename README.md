@@ -20,6 +20,9 @@ In the GUI:
 - Pick a reference PNG/JPG.
 - Pick a `prompts.json` of the form `[{"id": 1, "prompt": "..."}, ...]`.
 - Choose aspect (default `9:16`) and duration (default `10`).
+- Choose **Start** and **Count** to run only a slice of the prompt file.
+  `Start=21`, `Count=10` runs prompt items 21-30 by file order; `Count=0`
+  runs from Start through the end.
 - Click **Start**.
 
 A `project_YYYYMMDD_HHMMSS/` folder is created next to the reference image,

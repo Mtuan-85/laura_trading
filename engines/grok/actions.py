@@ -154,15 +154,58 @@ async def fill_prompt(
     speed: str = "fast",
     fast_mode: bool = False,
     stop_event: asyncio.Event | None = None,
+    typed_prefix: str | None = None,
+    paste_suffix: str | None = None,
 ) -> dict[str, Any]:
     try:
-        if fast_mode:
+        if typed_prefix and paste_suffix is not None:
+            await hybrid_type_prompt(
+                page,
+                typed_prefix=typed_prefix,
+                paste_suffix=paste_suffix,
+                stop_event=stop_event,
+            )
+        elif fast_mode:
             await _fast_paste_prompt(page, text, stop_event=stop_event)
         else:
             await human_type(page, SEL.PROMPT_INPUT, text, speed=speed)
         return {"ok": True}
     except Exception as e:
         return {"ok": False, "reason": f"fill_prompt: {e}"}
+
+
+async def hybrid_type_prompt(
+    page: Page,
+    *,
+    typed_prefix: str,
+    paste_suffix: str,
+    stop_event: asyncio.Event | None = None,
+) -> None:
+    await page.locator(SEL.PROMPT_INPUT).first.click()
+    await asyncio.sleep(random.uniform(0.2, 0.4))
+    await page.keyboard.press("Control+A")
+    await page.keyboard.press("Delete")
+    await asyncio.sleep(0.1)
+
+    for char in typed_prefix:
+        await page.keyboard.type(char)
+        await asyncio.sleep(random.uniform(0.005, 0.020))
+        if char in ".,!?;:":
+            await asyncio.sleep(random.uniform(0.03, 0.08))
+
+    if paste_suffix:
+        await page.keyboard.press("Shift+Enter")
+        await page.keyboard.press("Shift+Enter")
+        for i, line in enumerate(paste_suffix.split("\n")):
+            if line:
+                await page.keyboard.insert_text(line)
+            if i < len(paste_suffix.split("\n")) - 1:
+                await page.keyboard.press("Shift+Enter")
+
+    for _ in range(2):
+        if stop_event is not None and stop_event.is_set():
+            raise asyncio.CancelledError("stop requested during hybrid prompt settle")
+        await asyncio.sleep(1)
 
 
 async def _fast_paste_prompt(
@@ -282,6 +325,44 @@ async def set_video_resolution(page: Page, value: str) -> dict[str, Any]:
 
 async def set_video_duration(page: Page, value: str) -> dict[str, Any]:
     return await _click_radio_in_group(page, SEL.VIDEO_DUR_GROUP, value)
+
+
+async def verify_video_resolution(page: Page, expected: str) -> dict[str, Any]:
+    """Inspect the rendered <video> on the post page and report whether Grok
+    actually served the requested resolution. Never blocks: on downgrade the
+    caller still proceeds to download; ChainRunner decides what to do."""
+    try:
+        expected_p = int(str(expected).strip().lower().rstrip("p"))
+    except (ValueError, AttributeError):
+        return {"ok": False, "reason": f"verify_video_resolution: bad expected={expected!r}"}
+
+    try:
+        dims = await page.evaluate(
+            """() => {
+                const v = document.querySelector('#sd-video');
+                if (!v) return null;
+                return {w: v.videoWidth, h: v.videoHeight};
+            }"""
+        )
+    except Exception as e:
+        return {"ok": False, "reason": f"verify_video_resolution: {e}"}
+
+    if not dims or not dims.get("w") or not dims.get("h"):
+        return {"ok": False, "reason": "verify_video_resolution: #sd-video not ready"}
+
+    w, h = int(dims["w"]), int(dims["h"])
+    actual_p = min(w, h)
+    downgrade = actual_p < expected_p
+    tag = "DOWNGRADE" if downgrade else "ok"
+    log.info(f"verify_video_resolution: {w}x{h} actual={actual_p}p expected={expected_p}p [{tag}]")
+    return {
+        "ok": True,
+        "downgrade": downgrade,
+        "actual_p": actual_p,
+        "expected_p": expected_p,
+        "width": w,
+        "height": h,
+    }
 
 
 # --- Image generation polling ------------------------------------------------
@@ -438,7 +519,6 @@ async def save_candidates_log(
     prompt_text: str,
     masonry_index: int,
     target_count: int,
-    pick_mode: str,
 ) -> dict[str, Any]:
     """Save debug log: strip.png + 0.png..N.png + prompt.txt + meta.json."""
     cdir = _candidates_dir(debug_dir, counter)
@@ -479,7 +559,6 @@ async def save_candidates_log(
         "target_count": target_count,
         "masonry_index": masonry_index,
         "saved_candidates": len(saved_paths),
-        "pick_mode": pick_mode,
         "timestamp": datetime.now().isoformat(),
     }
     (cdir / "meta.json").write_text(
